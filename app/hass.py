@@ -1,8 +1,10 @@
 import httpx
+import asyncio
 from typing import Dict, Any, Optional, List, TypeVar, Callable, Awaitable, Union, cast
 import functools
 import inspect
 import logging
+import math
 import os
 import ssl
 from datetime import datetime, timedelta, timezone
@@ -21,6 +23,22 @@ F = TypeVar('F', bound=Callable[..., Awaitable[Any]])
 
 # HTTP client
 _client: Optional[httpx.AsyncClient] = None
+DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
+MAX_SERVICE_TIMEOUT_SECONDS = 60.0
+
+
+class ServiceCallTimeout(httpx.TimeoutException):
+    """The client stopped waiting; this does not establish the service outcome."""
+
+
+def _service_timeout_seconds(domain: str, service: str, override: Optional[float]) -> float:
+    selected = override if override is not None else (
+        MAX_SERVICE_TIMEOUT_SECONDS if (domain, service) == ("automation", "reload")
+        else DEFAULT_HTTP_TIMEOUT_SECONDS)
+    if (isinstance(selected, bool) or not isinstance(selected, (int, float))
+            or not 1 <= selected <= MAX_SERVICE_TIMEOUT_SECONDS or not math.isfinite(selected)):
+        raise ValueError("timeout_seconds must be a finite number between 1 and 60")
+    return float(selected)
 
 # Default field sets for different verbosity levels
 # Lean fields for standard requests (optimized for token efficiency)
@@ -80,6 +98,10 @@ def handle_api_errors(func: F) -> F:
             return await func(*args, **kwargs)
         except httpx.ConnectError:
             return format_error(f"Connection error: Cannot connect to Home Assistant at {HA_URL}")
+        except ServiceCallTimeout:
+            return format_error(
+                f"Timeout error: Home Assistant at {HA_URL} did not respond in time. "
+                "Service outcome is uncertain; verify effects before retrying.")
         except httpx.TimeoutException:
             return format_error(f"Timeout error: Home Assistant at {HA_URL} did not respond in time")
         except httpx.HTTPStatusError as e:
@@ -122,7 +144,7 @@ async def get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
         logger.debug("Creating new HTTP client")
-        _client = httpx.AsyncClient(timeout=10.0, verify=_build_ssl_context())
+        _client = httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT_SECONDS, verify=_build_ssl_context())
     return _client
 
 async def cleanup_client() -> None:
@@ -354,7 +376,8 @@ async def get_entities(
         return entities
 
 @handle_api_errors
-async def call_service(domain: str, service: str, data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+async def call_service(domain: str, service: str, data: Optional[Dict[str, Any]] = None,
+                       *, timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
     """Call a Home Assistant service.
 
     Returns:
@@ -363,12 +386,21 @@ async def call_service(domain: str, service: str, data: Optional[Dict[str, Any]]
     if data is None:
         data = {}
     
-    client = await get_client()
-    response = await client.post(
-        f"{HA_URL}/api/services/{domain}/{service}", 
-        headers=get_ha_headers(),
-        json=data
-    )
+    budget = _service_timeout_seconds(domain, service, timeout_seconds)
+    deadline = asyncio.timeout(budget)
+    try:
+        async with deadline:
+            client = await get_client()
+            response = await client.post(
+                f"{HA_URL}/api/services/{domain}/{service}",
+                headers=get_ha_headers(), json=data,
+                timeout=httpx.Timeout(DEFAULT_HTTP_TIMEOUT_SECONDS, read=budget))
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        raise ServiceCallTimeout("Service call deadline expired") from exc
+    except httpx.TimeoutException as exc:
+        raise ServiceCallTimeout("Service call request timed out") from exc
     response.raise_for_status()
     
     # Invalidate cache after service calls as they might change entity states

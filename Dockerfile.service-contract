@@ -1,3 +1,4 @@
 # v0.6.1 release image, including its locked runtime dependencies.
 FROM voska/hass-mcp@sha256:88b5614295d131b6f4f199db79dc878b685e88252064686eafc9999c37620d27
 COPY app/server.py /usr/local/lib/python3.13/site-packages/app/server.py
+COPY app/hass.py /usr/local/lib/python3.13/site-packages/app/hass.py

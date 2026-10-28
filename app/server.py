@@ -2,7 +2,8 @@ import functools
 import logging
 import json
 import httpx
-from typing import List, Dict, Any, Optional, Callable, Awaitable, TypeVar, Union, cast
+from typing import List, Dict, Any, Optional, Callable, Awaitable, TypeVar, Union, cast, Annotated
+from pydantic import Field
 
 # Set up logging
 logging.basicConfig(
@@ -20,6 +21,7 @@ from app.hass import (
     cleanup_client, filter_fields, summarize_domain, get_system_overview,
     get_hass_error_log, get_entity_history, get_entity_history_range,
     get_entity_statistics, get_entity_statistics_range,
+    MAX_SERVICE_TIMEOUT_SECONDS,
 )
 from app import lovelace
 
@@ -944,7 +946,11 @@ async def restart_ha() -> Dict[str, Any]:
 
 @mcp.tool()
 @async_handler("call_service")
-async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def call_service_tool(
+    domain: str, service: str, data: Optional[Dict[str, Any]] = None,
+    timeout_seconds: Annotated[Optional[float], Field(
+        ge=1, le=MAX_SERVICE_TIMEOUT_SECONDS, strict=True, allow_inf_nan=False)] = None,
+) -> Dict[str, Any]:
     """
     Call any Home Assistant service (low-level API access)
     
@@ -952,6 +958,10 @@ async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, 
         domain: The domain of the service (e.g., 'light', 'switch', 'automation')
         service: The service to call (e.g., 'turn_on', 'turn_off', 'toggle')
         data: Optional data to pass to the service (e.g., {'entity_id': 'light.living_room'})
+        timeout_seconds: Optional total HTTP exchange deadline, 1–60 seconds.
+            Defaults to 60 for automation.reload and 10 for other services.
+            This option is not forwarded as service data. On timeout, verify
+            the action's effect before retrying; the service may still complete.
     
     Returns:
         A dictionary with success status, the domain/service called, and the
@@ -964,7 +974,8 @@ async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, 
 
     """
     logger.info(f"Calling Home Assistant service: {domain}.{service} with data: {data}")
-    affected_entities = await call_service(domain, service, data or {})
+    options = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+    affected_entities = await call_service(domain, service, data or {}, **options)
     # The HA helper converts failures to error dictionaries. Preserve MCP's
     # failure channel rather than wrapping those values in success=True.
     if isinstance(affected_entities, dict) and "error" in affected_entities:
