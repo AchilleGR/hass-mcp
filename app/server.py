@@ -26,6 +26,7 @@ T = TypeVar('T')
 
 # Create an MCP server
 from mcp.server.fastmcp import FastMCP, Context, Image
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 import mcp.types as types
 mcp = FastMCP("Hass-MCP")
@@ -889,7 +890,8 @@ async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, 
         data: Optional data to pass to the service (e.g., {'entity_id': 'light.living_room'})
     
     Returns:
-        The response from Home Assistant (usually empty for successful calls)
+        A success envelope preserving Home Assistant's list or dictionary response.
+        Backend errors are reported through the MCP tool error channel.
     
     Examples:
         domain='light', service='turn_on', data={'entity_id': 'light.x', 'brightness': 255}
@@ -898,7 +900,16 @@ async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, 
     
     """
     logger.info(f"Calling Home Assistant service: {domain}.{service} with data: {data}")
-    return await call_service(domain, service, data or {})
+    affected_entities = await call_service(domain, service, data or {})
+    # The helper catches HTTP errors and returns an error dictionary.
+    if isinstance(affected_entities, dict) and "error" in affected_entities:
+        raise ToolError(affected_entities["error"])
+    if isinstance(affected_entities, list) and any(
+        isinstance(item, dict) and "error" in item for item in affected_entities
+    ):
+        raise ToolError("Home Assistant service returned an error")
+    return {"success": True, "domain": domain, "service": service,
+            "affected_entities": affected_entities}
 
 # Prompt functionality
 @mcp.prompt()
