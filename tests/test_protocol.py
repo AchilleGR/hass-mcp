@@ -185,6 +185,36 @@ async def test_call_service_tool_returns_dict_for_empty_list():
 
 # --- Roundtrip with respx (expected to pass on master) ----------------------
 
+@pytest.mark.parametrize("status", [401, 403, 500])
+@respx.mock
+async def test_call_service_http_failure_is_mcp_error(status):
+    route = respx.post("http://localhost:8123/api/services/light/turn_on").mock(
+        return_value=httpx.Response(status, json={})
+    )
+    async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+        result = await client.call_tool("call_service_tool", arguments={
+            "domain": "light", "service": "turn_on"})
+        assert result.isError
+        assert str(status) in result.content[0].text
+        assert route.call_count == 1
+
+
+@pytest.mark.parametrize("payload", [[], [{"entity_id": "light.test", "state": "on"}],
+                                     {"service_response": {"error": "valid nested data"}}])
+@respx.mock
+async def test_call_service_preserves_success_response(payload):
+    import json
+    route = respx.post("http://localhost:8123/api/services/light/turn_on").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    async with create_connected_server_and_client_session(mcp._mcp_server) as client:
+        result = await client.call_tool("call_service_tool", arguments={
+            "domain": "light", "service": "turn_on"})
+        assert not result.isError
+        assert json.loads(result.content[0].text) == {
+            "success": True, "domain": "light", "service": "turn_on", "affected_entities": payload}
+        assert route.call_count == 1
+
 @respx.mock
 async def test_get_entity_via_protocol():
     """End-to-end: MCP protocol -> tool -> mocked HA -> response surfaces in tool output."""

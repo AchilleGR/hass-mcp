@@ -30,6 +30,7 @@ T = TypeVar('T')
 import os
 
 from mcp.server.fastmcp import FastMCP, Context, Image
+from mcp.server.fastmcp.exceptions import ToolError
 import mcp.types as types
 
 # When MCP_TRANSPORT is "streamable-http", configure for stateless operation
@@ -964,6 +965,14 @@ async def call_service_tool(domain: str, service: str, data: Optional[Dict[str, 
     """
     logger.info(f"Calling Home Assistant service: {domain}.{service} with data: {data}")
     affected_entities = await call_service(domain, service, data or {})
+    # The HA helper converts failures to error dictionaries. Preserve MCP's
+    # failure channel rather than wrapping those values in success=True.
+    if isinstance(affected_entities, dict) and "error" in affected_entities:
+        raise ToolError(affected_entities["error"])
+    if isinstance(affected_entities, list):
+        for item in affected_entities:
+            if isinstance(item, dict) and "error" in item:
+                raise ToolError(str(item["error"]))
     return {
         "success": True,
         "domain": domain,
